@@ -20,3 +20,6 @@ perf.data*
 
 # cross
 /zcross
+
+# claude
+CLAUDE.md
