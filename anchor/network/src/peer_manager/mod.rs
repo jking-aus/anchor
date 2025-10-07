@@ -30,6 +30,7 @@ use blocking::BlockingManager;
 use connection::ConnectionManager;
 use discovery::PeerDiscovery;
 use heartbeat::HeartbeatManager;
+pub use blocking::BlockReason;
 pub use types::{ConnectActions, Event};
 
 /// Main peer manager that coordinates all peer management functionality
@@ -94,6 +95,9 @@ impl PeerManager {
             "Network status"
         );
 
+        // Update blocked peer metrics for Prometheus
+        self.blocking_manager.update_blocked_peer_metrics();
+
         // Check and unblock peers that have been blocked long enough
         self.blocking_manager.check_and_unblock_expired_peers();
 
@@ -106,9 +110,9 @@ impl PeerManager {
         )
     }
 
-    /// Block a peer and track timestamp for automatic unblocking
-    pub fn block_peer(&mut self, peer_id: PeerId) -> bool {
-        self.blocking_manager.block_peer(peer_id)
+    /// Block a peer with a reason and track timestamp for automatic unblocking
+    pub fn block_peer(&mut self, peer_id: PeerId, reason: BlockReason) -> bool {
+        self.blocking_manager.block_peer(peer_id, reason)
     }
 
     /// Unblock a peer, allowing it to connect again

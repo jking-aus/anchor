@@ -11,14 +11,39 @@ use libp2p::{
 };
 use tracing::debug;
 
-use crate::scoring::peer_score_config::RETAIN_SCORE_EPOCH_MULTIPLIER;
+use crate::{
+    metrics,
+    scoring::peer_score_config::RETAIN_SCORE_EPOCH_MULTIPLIER,
+};
+
+/// Reasons why a peer might be blocked
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockReason {
+    /// Peer was blocked due to having a low gossipsub score
+    LowScore,
+    /// Peer was blocked due to failed handshake
+    FailedHandshake,
+    /// Peer was blocked for rate limiting violations
+    RateLimiting,
+    /// Peer was blocked for other reasons
+    Other,
+}
+
+/// Information about a blocked peer
+#[derive(Debug, Clone)]
+struct BlockedPeerInfo {
+    /// When the peer was blocked
+    blocked_at: tokio::time::Instant,
+    /// Why the peer was blocked
+    reason: BlockReason,
+}
 
 /// Manages peer blocking functionality
 pub struct BlockingManager {
     /// Block list behaviour for actual connection denial
     block_list: allow_block_list::Behaviour<allow_block_list::BlockedPeers>,
-    /// Tracking when peers were blocked for automatic unblocking
-    blocked_peers_timestamps: HashMap<PeerId, tokio::time::Instant>,
+    /// Tracking when peers were blocked and why for automatic unblocking
+    blocked_peers_info: HashMap<PeerId, BlockedPeerInfo>,
     /// One epoch duration for calculating retain_score timeout
     one_epoch_duration: Duration,
 }
@@ -27,17 +52,22 @@ impl BlockingManager {
     pub fn new(one_epoch_duration: Duration) -> Self {
         Self {
             block_list: allow_block_list::Behaviour::<allow_block_list::BlockedPeers>::default(),
-            blocked_peers_timestamps: HashMap::new(),
+            blocked_peers_info: HashMap::new(),
             one_epoch_duration,
         }
     }
 
-    /// Block a peer and track timestamp for automatic unblocking
-    pub fn block_peer(&mut self, peer_id: PeerId) -> bool {
+    /// Block a peer with a reason and track timestamp for automatic unblocking
+    pub fn block_peer(&mut self, peer_id: PeerId, reason: BlockReason) -> bool {
         if self.block_list.block_peer(peer_id) {
-            self.blocked_peers_timestamps
-                .insert(peer_id, tokio::time::Instant::now());
-            debug!(?peer_id, "Blocked peer");
+            self.blocked_peers_info.insert(
+                peer_id,
+                BlockedPeerInfo {
+                    blocked_at: tokio::time::Instant::now(),
+                    reason,
+                },
+            );
+            debug!(?peer_id, ?reason, "Blocked peer");
             true
         } else {
             false
@@ -48,7 +78,7 @@ impl BlockingManager {
     pub fn unblock_peer(&mut self, peer_id: PeerId) -> bool {
         let was_removed = self.block_list.unblock_peer(peer_id);
         if was_removed {
-            self.blocked_peers_timestamps.remove(&peer_id);
+            self.blocked_peers_info.remove(&peer_id);
             debug!(?peer_id, "Unblocked peer after retain_score duration");
         }
         was_removed
@@ -65,10 +95,10 @@ impl BlockingManager {
         let now = tokio::time::Instant::now();
 
         let peers_to_unblock: Vec<PeerId> = self
-            .blocked_peers_timestamps
+            .blocked_peers_info
             .iter()
-            .filter_map(|(&peer_id, &blocked_at)| {
-                if now.duration_since(blocked_at) >= retain_score_duration {
+            .filter_map(|(&peer_id, info)| {
+                if now.duration_since(info.blocked_at) >= retain_score_duration {
                     Some(peer_id)
                 } else {
                     None
@@ -82,7 +112,34 @@ impl BlockingManager {
     }
 
     pub fn blocked_peers_count(&self) -> usize {
-        self.blocked_peers_timestamps.len()
+        self.blocked_peers_info.len()
+    }
+
+    /// Get the count of blocked peers grouped by reason
+    pub fn blocked_peers_by_reason(&self) -> HashMap<BlockReason, usize> {
+        let mut counts = HashMap::new();
+        for info in self.blocked_peers_info.values() {
+            *counts.entry(info.reason).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Update Prometheus metrics with current blocked peer counts by reason
+    pub fn update_blocked_peer_metrics(&self) {
+        let counts = self.blocked_peers_by_reason();
+
+        if let Ok(gauge) = metrics::PEERS_BLOCKED_LOW_SCORE.as_ref() {
+            gauge.set(counts.get(&BlockReason::LowScore).copied().unwrap_or(0) as i64);
+        }
+        if let Ok(gauge) = metrics::PEERS_BLOCKED_FAILED_HANDSHAKE.as_ref() {
+            gauge.set(counts.get(&BlockReason::FailedHandshake).copied().unwrap_or(0) as i64);
+        }
+        if let Ok(gauge) = metrics::PEERS_BLOCKED_RATE_LIMITING.as_ref() {
+            gauge.set(counts.get(&BlockReason::RateLimiting).copied().unwrap_or(0) as i64);
+        }
+        if let Ok(gauge) = metrics::PEERS_BLOCKED_OTHER.as_ref() {
+            gauge.set(counts.get(&BlockReason::Other).copied().unwrap_or(0) as i64);
+        }
     }
 
     // Delegation methods for connection handling
@@ -184,27 +241,21 @@ mod tests {
 
         // Initially, peer should not be blocked
         assert!(!blocking_manager.blocked_peers().contains(&peer_id));
-        assert!(blocking_manager.blocked_peers_timestamps.is_empty());
+        assert!(blocking_manager.blocked_peers_info.is_empty());
 
-        // Block the peer (always tracks timestamp now)
-        let was_blocked = blocking_manager.block_peer(peer_id);
+        // Block the peer with LowScore reason
+        let was_blocked = blocking_manager.block_peer(peer_id, BlockReason::LowScore);
         assert!(was_blocked);
 
         // Verify peer is now blocked
         assert!(blocking_manager.blocked_peers().contains(&peer_id));
-        assert!(
-            blocking_manager
-                .blocked_peers_timestamps
-                .contains_key(&peer_id)
-        );
+        assert!(blocking_manager.blocked_peers_info.contains_key(&peer_id));
 
-        // Verify the block time was recorded (should be at the current paused time)
-        let block_time = blocking_manager
-            .blocked_peers_timestamps
-            .get(&peer_id)
-            .unwrap();
+        // Verify the block time and reason were recorded
+        let info = blocking_manager.blocked_peers_info.get(&peer_id).unwrap();
         let expected_time = tokio::time::Instant::now();
-        assert_eq!(*block_time, expected_time);
+        assert_eq!(info.blocked_at, expected_time);
+        assert_eq!(info.reason, BlockReason::LowScore);
     }
 
     #[tokio::test(start_paused = true)]
@@ -213,7 +264,7 @@ mod tests {
         let peer_id = create_test_peer_id();
 
         // Block the peer
-        blocking_manager.block_peer(peer_id);
+        blocking_manager.block_peer(peer_id, BlockReason::LowScore);
         assert!(blocking_manager.blocked_peers().contains(&peer_id));
 
         // Advance time beyond the retain_score period
@@ -226,11 +277,7 @@ mod tests {
 
         // Verify peer is now unblocked
         assert!(!blocking_manager.blocked_peers().contains(&peer_id));
-        assert!(
-            !blocking_manager
-                .blocked_peers_timestamps
-                .contains_key(&peer_id)
-        );
+        assert!(!blocking_manager.blocked_peers_info.contains_key(&peer_id));
     }
 
     #[tokio::test(start_paused = true)]
@@ -239,7 +286,7 @@ mod tests {
         let peer_id = create_test_peer_id();
 
         // Block the peer
-        blocking_manager.block_peer(peer_id);
+        blocking_manager.block_peer(peer_id, BlockReason::LowScore);
         assert!(blocking_manager.blocked_peers().contains(&peer_id));
 
         // Advance time but not enough to trigger unblocking
@@ -252,11 +299,7 @@ mod tests {
 
         // Verify peer is still blocked
         assert!(blocking_manager.blocked_peers().contains(&peer_id));
-        assert!(
-            blocking_manager
-                .blocked_peers_timestamps
-                .contains_key(&peer_id)
-        );
+        assert!(blocking_manager.blocked_peers_info.contains_key(&peer_id));
     }
 
     #[tokio::test(start_paused = true)]
@@ -267,18 +310,18 @@ mod tests {
         let peer_id_3 = create_test_peer_id();
 
         // Block peer_1 first
-        blocking_manager.block_peer(peer_id_1);
+        blocking_manager.block_peer(peer_id_1, BlockReason::LowScore);
 
         // Advance time a bit
         tokio::time::advance(Duration::from_secs(100)).await;
 
-        // Block peer_2 and peer_3
-        blocking_manager.block_peer(peer_id_2);
-        blocking_manager.block_peer(peer_id_3);
+        // Block peer_2 and peer_3 with different reasons
+        blocking_manager.block_peer(peer_id_2, BlockReason::FailedHandshake);
+        blocking_manager.block_peer(peer_id_3, BlockReason::RateLimiting);
 
         // Verify all are blocked
         assert_eq!(blocking_manager.blocked_peers().len(), 3);
-        assert_eq!(blocking_manager.blocked_peers_timestamps.len(), 3);
+        assert_eq!(blocking_manager.blocked_peers_info.len(), 3);
 
         // Advance time enough to unblock only peer_1 (it was blocked earlier)
         let retain_score_duration =
@@ -293,7 +336,7 @@ mod tests {
         assert!(blocking_manager.blocked_peers().contains(&peer_id_2));
         assert!(blocking_manager.blocked_peers().contains(&peer_id_3));
         assert_eq!(blocking_manager.blocked_peers().len(), 2);
-        assert_eq!(blocking_manager.blocked_peers_timestamps.len(), 2);
+        assert_eq!(blocking_manager.blocked_peers_info.len(), 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -302,7 +345,7 @@ mod tests {
         let peer_id = create_test_peer_id();
 
         // Block the peer
-        blocking_manager.block_peer(peer_id);
+        blocking_manager.block_peer(peer_id, BlockReason::LowScore);
         assert!(blocking_manager.blocked_peers().contains(&peer_id));
 
         // Manually unblock the peer
@@ -313,7 +356,7 @@ mod tests {
         assert!(!blocking_manager.blocked_peers().contains(&peer_id));
         assert!(
             !blocking_manager
-                .blocked_peers_timestamps
+                .blocked_peers_info
                 .contains_key(&peer_id)
         );
 
@@ -327,17 +370,11 @@ mod tests {
         let mut blocking_manager = create_test_blocking_manager();
         let peer_id = create_test_peer_id();
 
-        // Test block_peer method (now always tracks timestamps)
-        let was_blocked = blocking_manager.block_peer(peer_id);
+        // Test block_peer method
+        let was_blocked = blocking_manager.block_peer(peer_id, BlockReason::Other);
         assert!(was_blocked);
         assert!(blocking_manager.blocked_peers().contains(&peer_id));
-
-        // Now block_peer always adds to timestamps tracking
-        assert!(
-            blocking_manager
-                .blocked_peers_timestamps
-                .contains_key(&peer_id)
-        );
+        assert!(blocking_manager.blocked_peers_info.contains_key(&peer_id));
 
         // Test unblock
         let was_unblocked = blocking_manager.unblock_peer(peer_id);
@@ -354,12 +391,12 @@ mod tests {
         // Initially no blocked peers
         assert_eq!(blocking_manager.blocked_peers_count(), 0);
 
-        // Block one peer (now always adds to timestamp tracking)
-        blocking_manager.block_peer(peer_id_1);
+        // Block one peer
+        blocking_manager.block_peer(peer_id_1, BlockReason::LowScore);
         assert_eq!(blocking_manager.blocked_peers_count(), 1);
 
-        // Block another peer (also adds to timestamp tracking)
-        blocking_manager.block_peer(peer_id_2);
+        // Block another peer
+        blocking_manager.block_peer(peer_id_2, BlockReason::FailedHandshake);
         assert_eq!(blocking_manager.blocked_peers_count(), 2);
 
         // Unblock one peer
@@ -373,29 +410,28 @@ mod tests {
         let peer_id = create_test_peer_id();
 
         // Block the peer for the first time
-        blocking_manager.block_peer(peer_id);
+        blocking_manager.block_peer(peer_id, BlockReason::RateLimiting);
         assert!(blocking_manager.blocked_peers().contains(&peer_id));
-        assert_eq!(blocking_manager.blocked_peers_timestamps.len(), 1);
+        assert_eq!(blocking_manager.blocked_peers_info.len(), 1);
 
-        let first_block_time = *blocking_manager
-            .blocked_peers_timestamps
+        let first_block_info = blocking_manager
+            .blocked_peers_info
             .get(&peer_id)
-            .unwrap();
+            .unwrap()
+            .clone();
 
         // Advance time slightly
         tokio::time::advance(Duration::from_secs(10)).await;
 
-        // Try to block the same peer again
-        blocking_manager.block_peer(peer_id);
+        // Try to block the same peer again with different reason
+        blocking_manager.block_peer(peer_id, BlockReason::LowScore);
 
-        // Should still be blocked but time shouldn't change (no double blocking)
+        // Should still be blocked but time/reason shouldn't change (no double blocking)
         assert!(blocking_manager.blocked_peers().contains(&peer_id));
-        assert_eq!(blocking_manager.blocked_peers_timestamps.len(), 1);
+        assert_eq!(blocking_manager.blocked_peers_info.len(), 1);
 
-        let second_block_time = *blocking_manager
-            .blocked_peers_timestamps
-            .get(&peer_id)
-            .unwrap();
-        assert_eq!(first_block_time, second_block_time); // Time should not have changed
+        let second_block_info = blocking_manager.blocked_peers_info.get(&peer_id).unwrap();
+        assert_eq!(first_block_info.blocked_at, second_block_info.blocked_at);
+        assert_eq!(first_block_info.reason, second_block_info.reason);
     }
 }

@@ -554,7 +554,10 @@ impl<R: MessageReceiver> Network<R> {
         let excess = self.swarm.connected_peers().count().saturating_sub(target);
 
         for peer_id in &peers_to_block_and_disconnect {
-            self.swarm.behaviour_mut().peer_manager.block_peer(*peer_id);
+            self.swarm
+                .behaviour_mut()
+                .peer_manager
+                .block_peer(*peer_id, crate::peer_manager::BlockReason::LowScore);
             self.disconnect_peer(peer_id, "Blocking peer due to low score");
         }
 
