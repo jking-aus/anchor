@@ -252,6 +252,17 @@ impl<R: MessageReceiver> Network<R> {
                         SwarmEvent::NewListenAddr { listener_id, address } => {
                             self.on_new_listen_addr(listener_id, address);
                         },
+                        SwarmEvent::OutgoingConnectionError { peer_id: Some(peer_id), error, .. } => {
+                            debug!(%peer_id, ?error, "Outgoing connection error");
+                            self.swarm
+                                .behaviour_mut()
+                                .peer_manager
+                                .block_peer(peer_id, crate::peer_manager::BlockReason::ConnectionError);
+                        },
+                        SwarmEvent::IncomingConnectionError { connection_id, local_addr, send_back_addr, error } => {
+                            debug!(?connection_id, ?local_addr, ?send_back_addr, ?error, "Incoming connection error");
+                            // Note: We don't have a peer_id for incoming connection errors before handshake
+                        },
                         _ => {
                             trace!(event = ?swarm_message, "Unhandled swarm event");
                         },
@@ -517,7 +528,11 @@ impl<R: MessageReceiver> Network<R> {
             Err(handshake::Failed { peer_id, error }) => {
                 debug!(%peer_id, ?error, "Handshake failed");
 
-                // Disconnect the peer on handshake failure
+                // Block and disconnect the peer on handshake failure
+                self.swarm
+                    .behaviour_mut()
+                    .peer_manager
+                    .block_peer(peer_id, crate::peer_manager::BlockReason::FailedHandshake);
                 self.disconnect_peer(&peer_id, "Handshake failed");
             }
         }

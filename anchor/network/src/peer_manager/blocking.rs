@@ -23,8 +23,10 @@ pub enum BlockReason {
     LowScore,
     /// Peer was blocked due to failed handshake
     FailedHandshake,
-    /// Peer was blocked for rate limiting violations
-    RateLimiting,
+    /// Peer was blocked due to outgoing connection errors (dial failures, timeouts, etc.)
+    OutgoingConnectionError,
+    /// Peer was blocked due to incoming connection errors
+    IncomingConnectionError,
     /// Peer was blocked for other reasons
     Other,
 }
@@ -134,8 +136,11 @@ impl BlockingManager {
         if let Ok(gauge) = metrics::PEERS_BLOCKED_FAILED_HANDSHAKE.as_ref() {
             gauge.set(counts.get(&BlockReason::FailedHandshake).copied().unwrap_or(0) as i64);
         }
-        if let Ok(gauge) = metrics::PEERS_BLOCKED_RATE_LIMITING.as_ref() {
-            gauge.set(counts.get(&BlockReason::RateLimiting).copied().unwrap_or(0) as i64);
+        if let Ok(gauge) = metrics::PEERS_BLOCKED_OUTGOING_CONNECTION_ERROR.as_ref() {
+            gauge.set(counts.get(&BlockReason::OutgoingConnectionError).copied().unwrap_or(0) as i64);
+        }
+        if let Ok(gauge) = metrics::PEERS_BLOCKED_INCOMING_CONNECTION_ERROR.as_ref() {
+            gauge.set(counts.get(&BlockReason::IncomingConnectionError).copied().unwrap_or(0) as i64);
         }
         if let Ok(gauge) = metrics::PEERS_BLOCKED_OTHER.as_ref() {
             gauge.set(counts.get(&BlockReason::Other).copied().unwrap_or(0) as i64);
@@ -317,7 +322,7 @@ mod tests {
 
         // Block peer_2 and peer_3 with different reasons
         blocking_manager.block_peer(peer_id_2, BlockReason::FailedHandshake);
-        blocking_manager.block_peer(peer_id_3, BlockReason::RateLimiting);
+        blocking_manager.block_peer(peer_id_3, BlockReason::ConnectionError);
 
         // Verify all are blocked
         assert_eq!(blocking_manager.blocked_peers().len(), 3);
@@ -410,7 +415,7 @@ mod tests {
         let peer_id = create_test_peer_id();
 
         // Block the peer for the first time
-        blocking_manager.block_peer(peer_id, BlockReason::RateLimiting);
+        blocking_manager.block_peer(peer_id, BlockReason::ConnectionError);
         assert!(blocking_manager.blocked_peers().contains(&peer_id));
         assert_eq!(blocking_manager.blocked_peers_info.len(), 1);
 
