@@ -40,3 +40,25 @@ pub static PEERS_BLOCKED_OTHER: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
         "Count of peers blocked for other reasons",
     )
 });
+
+pub static HANDSHAKE_SUCCESSFUL: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "libp2p_handshake_successful_total",
+        "Total count of successful handshakes",
+    )
+});
+
+pub static HANDSHAKE_FAILED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "libp2p_handshake_failed_total",
+        "Total count of failed handshakes",
+    )
+});
+
+pub static HANDSHAKE_SUBNET_MATCHES: LazyLock<Result<IntGaugeVec>> = LazyLock::new(|| {
+    try_create_int_gauge_vec(
+        "libp2p_handshake_subnet_matches",
+        "Count of successful handshakes by number of matching subnets",
+        &["match_count"],
+    )
+});
