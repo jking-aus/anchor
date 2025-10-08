@@ -257,11 +257,16 @@ impl<R: MessageReceiver> Network<R> {
                             self.swarm
                                 .behaviour_mut()
                                 .peer_manager
-                                .block_peer(peer_id, crate::peer_manager::BlockReason::ConnectionError);
+                                .block_peer(peer_id, crate::peer_manager::BlockReason::OutgoingConnectionError);
                         },
-                        SwarmEvent::IncomingConnectionError { connection_id, local_addr, send_back_addr, error } => {
-                            debug!(?connection_id, ?local_addr, ?send_back_addr, ?error, "Incoming connection error");
-                            // Note: We don't have a peer_id for incoming connection errors before handshake
+                        SwarmEvent::IncomingConnectionError { peer_id, connection_id, local_addr, send_back_addr, error } => {
+                            debug!(?peer_id, ?connection_id, ?local_addr, ?send_back_addr, ?error, "Incoming connection error");
+                            if let Some(peer_id) = peer_id {
+                                self.swarm
+                                    .behaviour_mut()
+                                    .peer_manager
+                                    .block_peer(peer_id, crate::peer_manager::BlockReason::IncomingConnectionError);
+                            }
                         },
                         _ => {
                             trace!(event = ?swarm_message, "Unhandled swarm event");

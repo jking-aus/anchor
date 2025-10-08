@@ -322,7 +322,7 @@ mod tests {
 
         // Block peer_2 and peer_3 with different reasons
         blocking_manager.block_peer(peer_id_2, BlockReason::FailedHandshake);
-        blocking_manager.block_peer(peer_id_3, BlockReason::ConnectionError);
+        blocking_manager.block_peer(peer_id_3, BlockReason::OutgoingConnectionError);
 
         // Verify all are blocked
         assert_eq!(blocking_manager.blocked_peers().len(), 3);
@@ -415,7 +415,7 @@ mod tests {
         let peer_id = create_test_peer_id();
 
         // Block the peer for the first time
-        blocking_manager.block_peer(peer_id, BlockReason::ConnectionError);
+        blocking_manager.block_peer(peer_id, BlockReason::IncomingConnectionError);
         assert!(blocking_manager.blocked_peers().contains(&peer_id));
         assert_eq!(blocking_manager.blocked_peers_info.len(), 1);
 

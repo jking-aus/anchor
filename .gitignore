@@ -28,5 +28,3 @@ docs/docs/dist/
 /.claude/settings.local.json
 
 # User directories
-/for_claude/
-/kingy_scripts/

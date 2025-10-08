@@ -20,10 +20,17 @@ pub static PEERS_BLOCKED_FAILED_HANDSHAKE: LazyLock<Result<IntGauge>> = LazyLock
     )
 });
 
-pub static PEERS_BLOCKED_CONNECTION_ERROR: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+pub static PEERS_BLOCKED_OUTGOING_CONNECTION_ERROR: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
     try_create_int_gauge(
-        "libp2p_blocked_peers_connection_error",
-        "Count of peers blocked due to connection errors",
+        "libp2p_blocked_peers_outgoing_connection_error",
+        "Count of peers blocked due to outgoing connection errors",
+    )
+});
+
+pub static PEERS_BLOCKED_INCOMING_CONNECTION_ERROR: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "libp2p_blocked_peers_incoming_connection_error",
+        "Count of peers blocked due to incoming connection errors",
     )
 });
 
